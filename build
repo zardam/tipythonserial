@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -e
+
+mkdir -p bin
+rm -f bin/update-bootloader.uf2
+rm -f bin/usb_serial.uf2
+
+git submodule foreach --recursive git clean -xfd
+git submodule foreach --recursive git reset --hard
+git submodule update --init --recursive
+
+(
+cd uf2-samdx1
+patch -p1 < ../patches/uf2-samdx1.patch
+make BOARD=trinket
+cp build/trinket/update-bootloader.uf2 ../bin
+)
+
+(
+cd tinyusb
+patch -p1 < ../patches/tinyusb.patch
+cd examples/device/cdc_msc_hid
+make BOARD=metro_m0_express
+)
+
+sed -i 's/const APP_START_ADDRESS = 0x00002000/const APP_START_ADDRESS = 0x00030000/' uf2-samdx1/scripts/bin2uf2.js
+node uf2-samdx1/scripts/bin2uf2.js tinyusb/examples/device/cdc_msc_hid/build-metro_m0_express/metro_m0_express-firmware.bin bin/usb_serial.uf2

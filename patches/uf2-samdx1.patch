@@ -1,0 +1,41 @@
+diff --git a/boards/trinket/board_config.h b/boards/trinket/board_config.h
+index 54e5f5f..904a672 100644
+--- a/boards/trinket/board_config.h
++++ b/boards/trinket/board_config.h
+@@ -10,8 +10,8 @@
+ #define INDEX_URL "https://adafru.it/trinketm0"
+ #define BOARD_ID "SAMD21E18A-Trinket-v0"
+ 
+-#define USB_VID 0x239A
+-#define USB_PID 0x0016
++#define USB_VID 0x0451
++#define USB_PID 0xe01f
+ 
+ #define LED_PIN PIN_PA10
+ //#define LED_TX_PIN PIN_PA27
+diff --git a/inc/uf2format.h b/inc/uf2format.h
+index 05eef01..19b74ed 100644
+--- a/inc/uf2format.h
++++ b/inc/uf2format.h
+@@ -7,7 +7,7 @@
+ // All entries are little endian.
+ 
+ // if you increase that, you will also need to update the linker script file
+-#define APP_START_ADDRESS 0x00002000
++#define APP_START_ADDRESS 0x00030000
+ 
+ #define UF2_MAGIC_START0 0x0A324655UL // "UF2\n"
+ #define UF2_MAGIC_START1 0x9E5D5157UL // Randomly selected
+diff --git a/src/fat.c b/src/fat.c
+index 7e77e52..7f45ab0 100644
+--- a/src/fat.c
++++ b/src/fat.c
+@@ -201,7 +201,7 @@ void write_block(uint32_t block_no, uint8_t *data, bool quiet, WriteState *state
+     }
+ 
+     if ((bl->flags & UF2_FLAG_NOFLASH) || bl->payloadSize != 256 || (bl->targetAddr & 0xff) ||
+-        bl->targetAddr < APP_START_ADDRESS || bl->targetAddr >= FLASH_SIZE) {
++        bl->targetAddr < 0x2000 || bl->targetAddr >= FLASH_SIZE) {
+ #if USE_DBG_MSC
+         if (!quiet)
+             logval("invalid target addr", bl->targetAddr);

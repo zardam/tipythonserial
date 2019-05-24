@@ -1,0 +1,1086 @@
+diff --git a/examples/device/cdc_msc_hid/src/main.c b/examples/device/cdc_msc_hid/src/main.c
+index f743026c..7522c8ae 100644
+--- a/examples/device/cdc_msc_hid/src/main.c
++++ b/examples/device/cdc_msc_hid/src/main.c
+@@ -1,4 +1,4 @@
+-/* 
++/*
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2018, hathach (tinyusb.org)
+@@ -30,6 +30,12 @@
+ #include "bsp/board.h"
+ #include "tusb.h"
+ 
++#include "include/sam.h"
++
++#include "usart_sam_ba.h"
++
++extern uint32_t _bootloader_dbl_tap;
++
+ //--------------------------------------------------------------------+
+ // MACRO CONSTANT TYPEDEF PROTYPES
+ //--------------------------------------------------------------------+
+@@ -52,11 +58,30 @@ void led_blinking_task(void);
+ void cdc_task(void);
+ void hid_task(void);
+ 
++static inline void system_interrupt_enable(
++		uint32_t vector)
++{
++	NVIC->ISER[0] = (uint32_t)(1 << ((uint32_t)vector & 0x0000001f));
++}
++
++static inline void system_interrupt_disable(
++		uint32_t vector)
++{
++	NVIC->ICER[0] = (uint32_t)(1 << ((uint32_t)vector & 0x0000001f));
++}
++
+ /*------------- MAIN -------------*/
+ int main(void)
+ {
+   board_init();
+ 
++  usart_open();
++
++  /* SERCOM2 handler enabled */
++	system_interrupt_enable(SERCOM0_IRQn);
++	/* receive complete interrupt set */
++	SERCOM0->USART.INTENSET.reg = SERCOM_USART_INTFLAG_RXC;
++
+   tusb_init();
+ 
+   while (1)
+@@ -78,6 +103,21 @@ int main(void)
+   return 0;
+ }
+ 
++// UART
++
++volatile uint32_t uart_nb_read = 0;
++volatile uint8_t uart_buffer[256];
++
++
++void SERCOM0_Handler()
++{
++	if (SERCOM0->USART.INTFLAG.bit.RXC){
++		uart_buffer[uart_nb_read] = SERCOM0->USART.DATA.reg;
++    uart_nb_read = (uart_nb_read + 1) % 256;
++	}
++}
++
++
+ //--------------------------------------------------------------------+
+ // Device callbacks
+ //--------------------------------------------------------------------+
+@@ -128,13 +168,17 @@ void cdc_task(void)
+ 
+       for(uint32_t i=0; i<count; i++)
+       {
+-        tud_cdc_write_char(buf[i]);
+-
+-        if ( buf[i] == '\r' ) tud_cdc_write_char('\n');
++        usart_putc(buf[i]);
+       }
++    }
+ 
+-      tud_cdc_write_flush();
++    system_interrupt_disable(SERCOM0_IRQn);
++    if(uart_nb_read > 0) {
++      tud_cdc_write((const void *) uart_buffer, uart_nb_read);
++      uart_nb_read = 0;
+     }
++    system_interrupt_enable(SERCOM0_IRQn);
++    tud_cdc_write_flush();
+   }
+ }
+ 
+@@ -143,11 +187,17 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+ {
+   (void) itf;
+ 
+-  // connected
+-  if ( dtr && rts )
++  // DTR = false is counted as disconnected
++  if ( !dtr )
+   {
+-    // print initial message when connected
+-    tud_cdc_write_str("\r\nTinyUSB CDC MSC HID device example\r\n");
++      cdc_line_coding_t coding;
++      tud_cdc_get_line_coding(&coding);
++
++      if ( coding.bit_rate == 1200 )
++      {
++        _bootloader_dbl_tap = 0xf01669ef;
++        NVIC_SystemReset();
++      }
+   }
+ }
+ 
+diff --git a/examples/device/cdc_msc_hid/src/tusb_config.h b/examples/device/cdc_msc_hid/src/tusb_config.h
+index c1210152..4ac68686 100644
+--- a/examples/device/cdc_msc_hid/src/tusb_config.h
++++ b/examples/device/cdc_msc_hid/src/tusb_config.h
+@@ -72,7 +72,7 @@
+ //------------- CLASS -------------//
+ #define CFG_TUD_CDC                 1
+ #define CFG_TUD_MSC                 1
+-#define CFG_TUD_HID                 1
++#define CFG_TUD_HID                 0
+ 
+ #define CFG_TUD_MIDI                0
+ #define CFG_TUD_CUSTOM_CLASS        0
+diff --git a/examples/device/cdc_msc_hid/src/uart.h b/examples/device/cdc_msc_hid/src/uart.h
+new file mode 100644
+index 00000000..f930a7d9
+--- /dev/null
++++ b/examples/device/cdc_msc_hid/src/uart.h
+@@ -0,0 +1,47 @@
++/* ----------------------------------------------------------------------------
++ *         SAM Software Package License
++ * ----------------------------------------------------------------------------
++ * Copyright (c) 2011-2014, Atmel Corporation
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following condition is met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the disclaimer below.
++ *
++ * Atmel's name may not be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * DISCLAIMER: THIS SOFTWARE IS PROVIDED BY ATMEL "AS IS" AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT ARE
++ * DISCLAIMED. IN NO EVENT SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
++ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ * ----------------------------------------------------------------------------
++ */
++
++#ifndef _UART_H_
++#define _UART_H_
++
++#define BOOT_USART_MODULE SERCOM0
++#define BOOT_USART_MUX_SETTINGS UART_RX_PAD3_TX_PAD2
++
++// Arduino Zero
++//#define BOOT_USART_PAD3 PINMUX_PA11C_SERCOM0_PAD3
++//#define BOOT_USART_PAD2 PINMUX_PA10C_SERCOM0_PAD2
++
++// Trinket
++#define BOOT_USART_PAD3 PINMUX_PA07D_SERCOM0_PAD3
++#define BOOT_USART_PAD2 PINMUX_PA06D_SERCOM0_PAD2
++
++#define BOOT_USART_PAD1 PINMUX_UNUSED
++#define BOOT_USART_PAD0 PINMUX_UNUSED
++
++#endif // _UART_H_
+diff --git a/examples/device/cdc_msc_hid/src/uart_driver.c b/examples/device/cdc_msc_hid/src/uart_driver.c
+new file mode 100644
+index 00000000..5a2c0e0b
+--- /dev/null
++++ b/examples/device/cdc_msc_hid/src/uart_driver.c
+@@ -0,0 +1,136 @@
++/* ----------------------------------------------------------------------------
++ *         SAM Software Package License
++ * ----------------------------------------------------------------------------
++ * Copyright (c) 2011-2014, Atmel Corporation
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following condition is met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the disclaimer below.
++ *
++ * Atmel's name may not be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * DISCLAIMER: THIS SOFTWARE IS PROVIDED BY ATMEL "AS IS" AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT ARE
++ * DISCLAIMED. IN NO EVENT SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
++ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ * ----------------------------------------------------------------------------
++ */
++
++#include "uart_driver.h"
++
++bool uart_drv_error_flag = false;
++
++uint32_t uart_get_sercom_index(Sercom *sercom_instance) {
++    /* Save all available SERCOM instances for compare. */
++    Sercom *sercom_instances[SERCOM_INST_NUM] = SERCOM_INSTS;
++
++    /* Find index for sercom instance. */
++    for (uint32_t i = 0; i < SERCOM_INST_NUM; i++) {
++        if ((uintptr_t)sercom_instance == (uintptr_t)sercom_instances[i]) {
++            return i;
++        }
++    }
++
++    return 0;
++}
++
++void uart_basic_init(Sercom *sercom, uint16_t baud_val, enum uart_pad_settings pad_conf) {
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.ENABLE)
++        ;
++    /* Disable the SERCOM UART module */
++    sercom->USART.CTRLA.bit.ENABLE = 0;
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.SWRST)
++        ;
++    /* Perform a software reset */
++    sercom->USART.CTRLA.bit.SWRST = 1;
++    /* Wait for synchronization */
++    while (sercom->USART.CTRLA.bit.SWRST)
++        ;
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.SWRST || sercom->USART.SYNCBUSY.bit.ENABLE)
++        ;
++    /* Update the UART pad settings, mode and data order settings */
++    sercom->USART.CTRLA.reg = pad_conf | SERCOM_USART_CTRLA_MODE(1) | SERCOM_USART_CTRLA_DORD;
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.CTRLB)
++        ;
++    /* Enable transmit and receive and set data size to 8 bits */
++    sercom->USART.CTRLB.reg =
++        SERCOM_USART_CTRLB_RXEN | SERCOM_USART_CTRLB_TXEN | SERCOM_USART_CTRLB_CHSIZE(0);
++    /* Load the baud value */
++    sercom->USART.BAUD.reg = baud_val;
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.ENABLE)
++        ;
++    /* Enable SERCOM UART */
++    sercom->USART.CTRLA.bit.ENABLE = 1;
++}
++
++void uart_disable(Sercom *sercom) {
++    /* Wait for synchronization */
++    while (sercom->USART.SYNCBUSY.bit.ENABLE)
++        ;
++    /* Disable SERCOM UART */
++    sercom->USART.CTRLA.bit.ENABLE = 0;
++}
++
++void uart_write_byte(Sercom *sercom, uint8_t data) {
++    /* Wait for Data Register Empty flag */
++    while (!sercom->USART.INTFLAG.bit.DRE)
++        ;
++    /* Write the data to DATA register */
++    sercom->USART.DATA.reg = (uint16_t)data;
++}
++
++uint8_t uart_read_byte(Sercom *sercom) {
++    /* Wait for Receive Complete flag */
++    while (!sercom->USART.INTFLAG.bit.RXC)
++        ;
++    /* Check for errors */
++    if (sercom->USART.STATUS.bit.PERR || sercom->USART.STATUS.bit.FERR ||
++        sercom->USART.STATUS.bit.BUFOVF)
++        /* Set the error flag */
++        uart_drv_error_flag = true;
++    /* Return the read data */
++    return ((uint8_t)sercom->USART.DATA.reg);
++}
++
++void uart_write_buffer_polled(Sercom *sercom, uint8_t *ptr, uint16_t length) {
++    /* Do the following for specified length */
++    do {
++        /* Wait for Data Register Empty flag */
++        while (!sercom->USART.INTFLAG.bit.DRE)
++            ;
++        /* Send data from the buffer */
++        sercom->USART.DATA.reg = (uint16_t)*ptr++;
++    } while (length--);
++}
++
++void uart_read_buffer_polled(Sercom *sercom, uint8_t *ptr, uint16_t length) {
++    /* Do the following for specified length */
++    do {
++        /* Wait for Receive Complete flag */
++        while (!sercom->USART.INTFLAG.bit.RXC)
++            ;
++        /* Check for errors */
++        if (sercom->USART.STATUS.bit.PERR || sercom->USART.STATUS.bit.FERR ||
++            sercom->USART.STATUS.bit.BUFOVF)
++            /* Set the error flag */
++            uart_drv_error_flag = true;
++        /* Store the read data to the buffer */
++        *ptr++ = (uint8_t)sercom->USART.DATA.reg;
++    } while (length--);
++}
+diff --git a/examples/device/cdc_msc_hid/src/uart_driver.h b/examples/device/cdc_msc_hid/src/uart_driver.h
+new file mode 100644
+index 00000000..e4c51af8
+--- /dev/null
++++ b/examples/device/cdc_msc_hid/src/uart_driver.h
+@@ -0,0 +1,107 @@
++/* ----------------------------------------------------------------------------
++ *         SAM Software Package License
++ * ----------------------------------------------------------------------------
++ * Copyright (c) 2011-2014, Atmel Corporation
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following condition is met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the disclaimer below.
++ *
++ * Atmel's name may not be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * DISCLAIMER: THIS SOFTWARE IS PROVIDED BY ATMEL "AS IS" AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT ARE
++ * DISCLAIMED. IN NO EVENT SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
++ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ * ----------------------------------------------------------------------------
++ */
++
++#ifndef UART_DRIVER_H
++#define UART_DRIVER_H
++#include "samd21.h"
++#include <stdbool.h>
++#include <stdio.h>
++
++#define PINMUX_UNUSED 0xFFFFFFFF
++#define GCLK_ID_SERCOM0_CORE 0x14
++
++/* SERCOM UART available pad settings */
++enum uart_pad_settings {
++    UART_RX_PAD0_TX_PAD2 = SERCOM_USART_CTRLA_RXPO(0) | SERCOM_USART_CTRLA_TXPO(1),
++    UART_RX_PAD1_TX_PAD2 = SERCOM_USART_CTRLA_RXPO(1) | SERCOM_USART_CTRLA_TXPO(1),
++    UART_RX_PAD2_TX_PAD0 = SERCOM_USART_CTRLA_RXPO(2),
++    UART_RX_PAD3_TX_PAD0 = SERCOM_USART_CTRLA_RXPO(3),
++    UART_RX_PAD1_TX_PAD0 = SERCOM_USART_CTRLA_RXPO(1),
++    UART_RX_PAD3_TX_PAD2 = SERCOM_USART_CTRLA_RXPO(3) | SERCOM_USART_CTRLA_TXPO(1),
++};
++
++/**
++ * \brief Gets the index of the provided SERCOM instance
++ *
++ * \param Pointer to SERCOM instance
++ * \return Index of the SERCOM module
++ */
++uint32_t uart_get_sercom_index(Sercom *sercom_instance);
++
++/**
++ * \brief Initializes the UART
++ *
++ * \param Pointer to SERCOM instance
++ * \param Baud value corresponding to the desired baudrate
++ * \param SERCOM pad settings
++ */
++void uart_basic_init(Sercom *sercom, uint16_t baud_val, enum uart_pad_settings pad_conf);
++
++/**
++ * \brief Disables UART interface
++ *
++ * \param Pointer to SERCOM instance
++ */
++void uart_disable(Sercom *sercom);
++
++/**
++ * \brief Sends a single byte through UART interface
++ *
++ * \param Pointer to SERCOM instance
++ * \param Data to send
++ */
++void uart_write_byte(Sercom *sercom, uint8_t data);
++
++/**
++ * \brief Reads a single character from UART interface
++ *
++ * \param Pointer to SERCOM instance
++ * \return Data byte read
++ */
++uint8_t uart_read_byte(Sercom *sercom);
++
++/**
++ * \brief Sends buffer on UART interface
++ *
++ * \param Pointer to SERCOM instance
++ * \param Pointer to data to send
++ * \param Number of bytes to send
++ */
++void uart_write_buffer_polled(Sercom *sercom, uint8_t *ptr, uint16_t length);
++
++/**
++ * \brief Reads data on UART interface
++ *
++ * \param Pointer to SERCOM instance
++ * \param Pointer to store read data
++ * \param Number of bytes to read
++ */
++void uart_read_buffer_polled(Sercom *sercom, uint8_t *ptr, uint16_t length);
++
++#endif
+\ No newline at end of file
+diff --git a/examples/device/cdc_msc_hid/src/usart_sam_ba.c b/examples/device/cdc_msc_hid/src/usart_sam_ba.c
+new file mode 100644
+index 00000000..6b2b44d9
+--- /dev/null
++++ b/examples/device/cdc_msc_hid/src/usart_sam_ba.c
+@@ -0,0 +1,222 @@
++/* ----------------------------------------------------------------------------
++ *         SAM Software Package License
++ * ----------------------------------------------------------------------------
++ * Copyright (c) 2011-2014, Atmel Corporation
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following condition is met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the disclaimer below.
++ *
++ * Atmel's name may not be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * DISCLAIMER: THIS SOFTWARE IS PROVIDED BY ATMEL "AS IS" AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT ARE
++ * DISCLAIMED. IN NO EVENT SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
++ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ * ----------------------------------------------------------------------------
++ */
++
++#include "uart_driver.h"
++#include "usart_sam_ba.h"
++
++/* Variable to let the main task select the appropriate communication interface
++ */
++volatile uint8_t b_sharp_received;
++
++/* RX and TX Buffers + rw pointers for each buffer */
++volatile uint8_t buffer_rx_usart[USART_BUFFER_SIZE];
++
++volatile uint8_t idx_rx_read;
++volatile uint8_t idx_rx_write;
++
++volatile uint8_t buffer_tx_usart[USART_BUFFER_SIZE];
++
++volatile uint8_t idx_tx_read;
++volatile uint8_t idx_tx_write;
++
++/* Test for timeout in AT91F_GetChar */
++uint8_t error_timeout;
++uint16_t size_of_data;
++uint8_t mode_of_transfer;
++
++#define BOOT_USART_PAD(n) BOOT_USART_PAD##n
++
++/**
++ * \brief Open the given USART
++ */
++void usart_open() {
++    uint32_t inst;
++    uint32_t port;
++    uint8_t pin;
++
++    /* Configure the port pins for SERCOM_USART */
++    if (BOOT_USART_PAD0 != PINMUX_UNUSED) {
++        /* Mask 6th bit in pin number to check whether it is greater than 32
++         * i.e., PORTB pin */
++        port = (BOOT_USART_PAD0 & 0x200000) >> 21;
++        pin = (uint8_t)(BOOT_USART_PAD0 >> 16);
++        PORT->Group[port].PINCFG[(pin - (port * 32))].bit.PMUXEN = 1;
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg &= ~(0xF << (4 * (pin & 0x01u)));
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg |= (BOOT_USART_PAD0 & 0xFF)
++                                                               << (4 * (pin & 0x01u));
++    }
++    if (BOOT_USART_PAD1 != PINMUX_UNUSED) {
++        /* Mask 6th bit in pin number to check whether it is greater than 32
++         * i.e., PORTB pin */
++        port = (BOOT_USART_PAD1 & 0x200000) >> 21;
++        pin = (uint8_t)(BOOT_USART_PAD1 >> 16);
++        PORT->Group[port].PINCFG[(pin - (port * 32))].bit.PMUXEN = 1;
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg &= ~(0xF << (4 * (pin & 0x01u)));
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg |= (BOOT_USART_PAD1 & 0xFF)
++                                                               << (4 * (pin & 0x01u));
++    }
++    if (BOOT_USART_PAD2 != PINMUX_UNUSED) {
++        /* Mask 6th bit in pin number to check whether it is greater than 32
++         * i.e., PORTB pin */
++        port = (BOOT_USART_PAD2 & 0x200000) >> 21;
++        pin = (uint8_t)(BOOT_USART_PAD2 >> 16);
++        PORT->Group[port].PINCFG[(pin - (port * 32))].bit.PMUXEN = 1;
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg &= ~(0xF << (4 * (pin & 0x01u)));
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg |= (BOOT_USART_PAD2 & 0xFF)
++                                                               << (4 * (pin & 0x01u));
++    }
++    if (BOOT_USART_PAD3 != PINMUX_UNUSED) {
++        /* Mask 6th bit in pin number to check whether it is greater than 32
++         * i.e., PORTB pin */
++        port = (BOOT_USART_PAD3 & 0x200000) >> 21;
++        pin = (uint8_t)(BOOT_USART_PAD3 >> 16);
++        PORT->Group[port].PINCFG[(pin - (port * 32))].bit.PMUXEN = 1;
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg &= ~(0xF << (4 * (pin & 0x01u)));
++        PORT->Group[port].PMUX[(pin - (port * 32)) / 2].reg |= (BOOT_USART_PAD3 & 0xFF)
++                                                               << (4 * (pin & 0x01u));
++    }
++
++    inst = uart_get_sercom_index(BOOT_USART_MODULE);
++
++    /* Enable clock for BOOT_USART_MODULE */
++    PM->APBCMASK.reg |= (1u << (inst + PM_APBCMASK_SERCOM0_Pos));
++
++    /* Set GCLK_GEN0 as source for GCLK_ID_SERCOMx_CORE */
++    GCLK_CLKCTRL_Type clkctrl = {0};
++    uint16_t temp;
++    GCLK->CLKCTRL.bit.ID = inst + GCLK_ID_SERCOM0_CORE;
++    temp = GCLK->CLKCTRL.reg;
++    clkctrl.bit.CLKEN = true;
++    clkctrl.bit.WRTLOCK = false;
++    clkctrl.bit.GEN = GCLK_CLKCTRL_GEN_GCLK1_Val;
++    GCLK->CLKCTRL.reg = (clkctrl.reg | temp);
++
++    /* Baud rate 115200 - clock 8MHz -> BAUD value-50436 */
++    uart_basic_init(BOOT_USART_MODULE, 50436, BOOT_USART_MUX_SETTINGS);
++
++    // Initialize flag
++    b_sharp_received = false;
++    idx_rx_read = 0;
++    idx_rx_write = 0;
++    idx_tx_read = 0;
++    idx_tx_write = 0;
++
++    error_timeout = 0;
++}
++
++/**
++ * \brief Configures communication line
++ *
++ */
++void usart_close(void) { uart_disable(BOOT_USART_MODULE); }
++
++/**
++ * \brief Puts a byte on usart line
++ * The type int is used to support printf redirection from compiler LIB.
++ *
++ * \param value      Value to put
++ *
++ * \return \c 1 if function was successfully done, otherwise \c 0.
++ */
++int usart_putc(int value) {
++    uart_write_byte(BOOT_USART_MODULE, (uint8_t)value);
++    return 1;
++}
++
++int usart_getc(void) {
++    uint16_t retval;
++    // Wait until input buffer is filled
++    while (!(usart_is_rx_ready()))
++        ;
++    retval = (uint16_t)uart_read_byte(BOOT_USART_MODULE);
++    // usart_read_wait(&usart_sam_ba, &retval);
++    return (int)retval;
++}
++
++int usart_sharp_received(void) {
++    if (usart_is_rx_ready()) {
++        if (usart_getc() == SHARP_CHARACTER)
++            return (true);
++    }
++    return (false);
++}
++
++bool usart_is_rx_ready(void) {
++    return (BOOT_USART_MODULE->USART.INTFLAG.reg & SERCOM_USART_INTFLAG_RXC);
++}
++
++int usart_readc(void) {
++    int retval;
++    retval = buffer_rx_usart[idx_rx_read];
++    idx_rx_read = (idx_rx_read + 1) & (USART_BUFFER_SIZE - 1);
++    return (retval);
++}
++
++// Send given data (polling)
++uint32_t usart_putdata(void const *data, uint32_t length) {
++    uint32_t i;
++    uint8_t *ptrdata;
++    ptrdata = (uint8_t *)data;
++    for (i = 0; i < length; i++) {
++        usart_putc(*ptrdata);
++        ptrdata++;
++    }
++    return (i);
++}
++
++// Get data from comm. device
++uint32_t usart_getdata(void *data, uint32_t length) {
++    uint8_t *ptrdata;
++    ptrdata = (uint8_t *)data;
++    *ptrdata = usart_getc();
++    return (1);
++}
++
++static uint16_t crcCache[256];
++
++//*----------------------------------------------------------------------------
++//* \fn    add_crc
++//* \brief Compute the CRC
++//*----------------------------------------------------------------------------
++uint16_t add_crc(uint8_t ch, unsigned short crc0) {
++    if (!crcCache[1]) {
++        for (int ptr = 0; ptr < 256; ptr++) {
++            uint16_t crc = (int)ptr << 8;
++            for (uint16_t cmpt = 0; cmpt < 8; cmpt++) {
++                if (crc & 0x8000)
++                    crc = crc << 1 ^ CRC16POLY;
++                else
++                    crc = crc << 1;
++            }
++            crcCache[ptr] = crc;
++        }
++    }
++
++    return ((crc0 << 8) ^ crcCache[((crc0 >> 8) ^ ch) & 0xff]) & 0xffff;
++}
+diff --git a/examples/device/cdc_msc_hid/src/usart_sam_ba.h b/examples/device/cdc_msc_hid/src/usart_sam_ba.h
+new file mode 100644
+index 00000000..8b17d677
+--- /dev/null
++++ b/examples/device/cdc_msc_hid/src/usart_sam_ba.h
+@@ -0,0 +1,135 @@
++/* ----------------------------------------------------------------------------
++ *         SAM Software Package License
++ * ----------------------------------------------------------------------------
++ * Copyright (c) 2011-2014, Atmel Corporation
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following condition is met:
++ *
++ * Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the disclaimer below.
++ *
++ * Atmel's name may not be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * DISCLAIMER: THIS SOFTWARE IS PROVIDED BY ATMEL "AS IS" AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT ARE
++ * DISCLAIMED. IN NO EVENT SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
++ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
++ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ * ----------------------------------------------------------------------------
++ */
++
++#ifndef _USART_SAM_BA_H_
++#define _USART_SAM_BA_H_
++
++#include "stdbool.h"
++#include "stdint.h"
++#include "uart.h"
++
++/* USART buffer size (must be a power of two) */
++#define USART_BUFFER_SIZE 128
++
++/* Define the default time-out value for USART. */
++#define USART_DEFAULT_TIMEOUT 1000
++
++/* Xmodem related defines */
++/* CRC16  polynomial */
++#define CRC16POLY 0x1021
++
++#define SHARP_CHARACTER '#'
++
++/* X/Ymodem protocol: */
++#define SOH 0x01
++//#define STX                    0x02
++#define EOT 0x04
++#define ACK 0x06
++#define NAK 0x15
++#define CAN 0x18
++#define ESC 0x1b
++
++#define PKTLEN_128 128
++
++/**
++ * \brief Open the given USART
++ */
++void usart_open(void);
++
++/**
++ * \brief Stops the USART
++ */
++void usart_close(void);
++
++/**
++ * \brief Puts a byte on usart line
++ *
++ * \param value      Value to put
++ *
++ * \return \c 1 if function was successfully done, otherwise \c 0.
++ */
++int usart_putc(int value);
++
++/**
++ * \brief Waits and gets a value on usart line
++ *
++ * \return value read on usart line
++ */
++int usart_getc(void);
++
++/**
++ * \brief Returns true if the SAM-BA Uart received the sharp char
++ *
++ * \return Returns true if the SAM-BA Uart received the sharp char
++ */
++int usart_sharp_received(void);
++
++/**
++ * \brief This function checks if a character has been received on the usart
++ * line
++ *
++ * \return \c 1 if a byte is ready to be read.
++ */
++bool usart_is_rx_ready(void);
++
++/**
++ * \brief Gets a value on usart line
++ *
++ * \return value read on usart line
++ */
++int usart_readc(void);
++
++/**
++ * \brief Send buffer on usart line
++ *
++ * \param data pointer
++ * \param number of data to send
++ * \return number of data sent
++ */
++uint32_t usart_putdata(void const *data, uint32_t length); // Send given data (polling)
++
++/**
++ * \brief Gets data from usart line
++ *
++ * \param data pointer
++ * \param number of data to get
++ * \return value read on usart line
++ */
++uint32_t usart_getdata(void *data, uint32_t length); // Get data from comm. device
++
++/**
++ * \brief Gets data from usart line using Xmodem protocol
++ *
++ * \param data pointer
++ * \param number of data to get
++ * \return value read on usart line
++ */
++uint16_t add_crc(uint8_t ch, unsigned short crc0);
++
++#endif // _USART_SAM_BA_H_
+diff --git a/examples/device/cdc_msc_hid/src/usb_descriptors.c b/examples/device/cdc_msc_hid/src/usb_descriptors.c
+index 72d280c2..ba0f985a 100644
+--- a/examples/device/cdc_msc_hid/src/usb_descriptors.c
++++ b/examples/device/cdc_msc_hid/src/usb_descriptors.c
+@@ -1,4 +1,4 @@
+-/* 
++/*
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2018, hathach (tinyusb.org)
+@@ -44,9 +44,9 @@ tusb_desc_device_t const desc_device =
+   #if CFG_TUD_CDC
+     // Use Interface Association Descriptor (IAD) for CDC
+     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
+-    .bDeviceClass       = TUSB_CLASS_MISC,
+-    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+-    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
++    .bDeviceClass       = 0,
++    .bDeviceSubClass    = 0,
++    .bDeviceProtocol    = 0,
+   #else
+     .bDeviceClass       = 0x00,
+     .bDeviceSubClass    = 0x00,
+@@ -55,8 +55,8 @@ tusb_desc_device_t const desc_device =
+ 
+     .bMaxPacketSize0    = CFG_TUD_ENDOINT0_SIZE,
+ 
+-    .idVendor           = 0xCafe,
+-    .idProduct          = USB_PID,
++    .idVendor           = 0x0451,
++    .idProduct          = 0xe020,
+     .bcdDevice          = 0x0100,
+ 
+     .iManufacturer      = 0x01,
+@@ -112,22 +112,22 @@ enum
+   // endpoint number for MSC to 5
+   #define EPNUM_MSC   0x05
+ #else
+-  #define EPNUM_MSC   0x03
++  #define EPNUM_MSC   0x04
+ #endif
+ 
+ uint8_t const desc_configuration[] =
+ {
+   // Inteface count, string index, total length, attribute, power in mA
+-  TUD_CONFIG_DESCRIPTOR(ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
++  TUD_CONFIG_DESCRIPTOR(ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 100),
+ 
+ #if CFG_TUD_CDC
+   // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
+-  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, 0x81, 8, 0x02, 0x82, 64),
++  TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, 0x81, 64, 0x02, 0x82, 64),
+ #endif
+ 
+ #if CFG_TUD_MSC
+   // Interface number, string index, EP Out & EP In address, EP size
+-  TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 5, EPNUM_MSC, 0x80 | EPNUM_MSC, 64), // highspeed 512
++  TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 5, EPNUM_MSC, 0x83, 64), // highspeed 512
+ #endif
+ 
+ #if CFG_TUD_HID
+diff --git a/examples/rules.mk b/examples/rules.mk
+index df9ffb7e..7dfca5a9 100644
+--- a/examples/rules.mk
++++ b/examples/rules.mk
+@@ -23,7 +23,7 @@ INC += $(TOP)/src
+ CFLAGS += $(addprefix -I,$(INC))
+ LDFLAGS += $(CFLAGS) -fshort-enums -Wl,-T,$(TOP)/$(LD_FILE) -Wl,-Map=$@.map -Wl,-cref -Wl,-gc-sections -specs=nosys.specs -specs=nano.specs
+ 
+-# Assembly files can be name with upper case .S, convert it to .s 
++# Assembly files can be name with upper case .S, convert it to .s
+ SRC_S := $(SRC_S:.S=.s)
+ 
+ # Due to GCC LTO bug https://bugs.launchpad.net/gcc-arm-embedded/+bug/1747966
+@@ -53,9 +53,9 @@ $(BUILD)/$(BOARD)-firmware.elf: $(OBJ)
+ 
+ $(BUILD)/$(BOARD)-firmware.bin: $(BUILD)/$(BOARD)-firmware.elf
+ 	@echo CREATE $@
+-	@$(OBJCOPY) -O binary -j .vectors -j .text -j .data $^ $@
+-	
+-$(BUILD)/$(BOARD)-firmware.hex: $(BUILD)/$(BOARD)-firmware.elf	
++	@$(OBJCOPY) -O binary $^ $@
++
++$(BUILD)/$(BOARD)-firmware.hex: $(BUILD)/$(BOARD)-firmware.elf
+ 	@echo CREATE $@
+ 	@$(OBJCOPY) -O ihex $^ $@
+ 
+@@ -93,11 +93,11 @@ size: $(BUILD)/$(BOARD)-firmware.elf
+ 
+ clean:
+ 	rm -rf build-$(BOARD)
+-	
++
+ # Flash binary using Jlink
+ ifeq ($(OS),Windows_NT)
+   JLINKEXE = JLink.exe
+-else 
++else
+   JLINKEXE = JLinkExe
+ endif
+ 
+diff --git a/hw/bsp/metro_m0_express/board_metro_m0_express.c b/hw/bsp/metro_m0_express/board_metro_m0_express.c
+index 792ce138..7dbf6da7 100644
+--- a/hw/bsp/metro_m0_express/board_metro_m0_express.c
++++ b/hw/bsp/metro_m0_express/board_metro_m0_express.c
+@@ -1,4 +1,4 @@
+-/* 
++/*
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2018, hathach (tinyusb.org)
+@@ -91,14 +91,10 @@ void board_init(void)
+   gpio_set_pin_function(PIN_PA24, PINMUX_PA24G_USB_DM);
+   gpio_set_pin_function(PIN_PA25, PINMUX_PA25G_USB_DP);
+ 
+-  // Output 500hz PWM on D12 (PA19 - TCC0 WO[3]) so we can validate the GCLK0 clock speed with a Saleae.
+-  _pm_enable_bus_clock(PM_BUS_APBC, TCC0);
+-  TCC0->PER.bit.PER = 48000000 / 1000;
+-  TCC0->CC[3].bit.CC = 48000000 / 2000;
+-  TCC0->CTRLA.bit.ENABLE = true;
+-
+-  gpio_set_pin_function(PIN_PA19, PINMUX_PA19F_TCC0_WO3);
+-  _gclk_enable_channel(TCC0_GCLK_ID, GCLK_CLKCTRL_GEN_GCLK0_Val);
++  SYSCTRL->OSC8M.bit.PRESC = 0;
++  GCLK->GENCTRL.bit.ID = 0x01;
++  GCLK->GENCTRL.reg |= GCLK_GENCTRL_SRC_OSC8M;
++  GCLK->GENCTRL.bit.GENEN = 1;
+ }
+ 
+ void board_led_write(bool state)
+diff --git a/hw/bsp/metro_m0_express/samd21g18a_flash.ld b/hw/bsp/metro_m0_express/samd21g18a_flash.ld
+index 7fc42171..b14c0b90 100644
+--- a/hw/bsp/metro_m0_express/samd21g18a_flash.ld
++++ b/hw/bsp/metro_m0_express/samd21g18a_flash.ld
+@@ -35,13 +35,15 @@ SEARCH_DIR(.)
+ /* Memory Spaces Definitions */
+ MEMORY
+ {
+-  rom      (rx)  : ORIGIN = 0x00000000 + 8K, LENGTH = 0x00040000 - 8K
++  rom      (rx)  : ORIGIN = 0x00000000 + 192K, LENGTH = 0x00040000 - 192K
+   ram      (rwx) : ORIGIN = 0x20000000, LENGTH = 0x00008000
+ }
+ 
+ /* The stack size used by the application. NOTE: you need to adjust according to your application. */
+ STACK_SIZE = DEFINED(STACK_SIZE) ? STACK_SIZE : DEFINED(__stack_size__) ? __stack_size__ : 0x2000;
+ 
++_bootloader_dbl_tap = ORIGIN(ram) + LENGTH(ram) - 4;
++
+ /* Section Definitions */
+ SECTIONS
+ {
+diff --git a/src/class/msc/msc_device.c b/src/class/msc/msc_device.c
+index f980e941..a7fd3b14 100644
+--- a/src/class/msc/msc_device.c
++++ b/src/class/msc/msc_device.c
+@@ -1,4 +1,4 @@
+-/* 
++/*
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2018, hathach (tinyusb.org)
+@@ -237,28 +237,47 @@ int32_t proc_builtin_scsi(msc_cbw_t const * p_cbw, uint8_t* buffer, uint32_t buf
+ 
+     case SCSI_CMD_INQUIRY:
+     {
+-      scsi_inquiry_resp_t inquiry_rsp =
+-      {
+-          .is_removable         = 1,
+-          .version              = 2,
+-          .response_data_format = 2,
+-          // vendor_id, product_id, product_rev is space padded string
+-          .vendor_id            = "",
+-          .product_id           = "",
+-          .product_rev          = "",
+-      };
++      if(p_cbw->lun == 0x03) {
++        uint32_t address = p_cbw->command[5] + (p_cbw->command[2] << 8) + (p_cbw->command[3] << 14) + 0x2000;
+ 
+-      memset(inquiry_rsp.vendor_id, ' ', sizeof(inquiry_rsp.vendor_id));
+-      memcpy(inquiry_rsp.vendor_id, CFG_TUD_MSC_VENDOR, tu_min32(strlen(CFG_TUD_MSC_VENDOR), sizeof(inquiry_rsp.vendor_id)));
++        ret = 5+96;
+ 
+-      memset(inquiry_rsp.product_id, ' ', sizeof(inquiry_rsp.product_id));
+-      memcpy(inquiry_rsp.product_id, CFG_TUD_MSC_PRODUCT, tu_min32(strlen(CFG_TUD_MSC_PRODUCT), sizeof(inquiry_rsp.product_id)));
++        buffer[0] = 0x00;
++        buffer[1] = 0x80;
++        buffer[2] = 0x03;
++        buffer[3] = 0x02;
++        buffer[4] = 0x60;
+ 
+-      memset(inquiry_rsp.product_rev, ' ', sizeof(inquiry_rsp.product_rev));
+-      memcpy(inquiry_rsp.product_rev, CFG_TUD_MSC_PRODUCT_REV, tu_min32(strlen(CFG_TUD_MSC_PRODUCT_REV), sizeof(inquiry_rsp.product_rev)));
++        memcpy(buffer + 5, (uint8_t*) address, 96);
++      } else if(p_cbw->lun == 0x02 && p_cbw->command[4] == 0x24) {
++          const uint8_t version[36] = {0x00 ,0x80 ,0x03 ,0x02 ,0x1F ,0x03 ,0x00 ,0x00 ,0x14 ,0x00 ,0xFA ,0x7C ,0xDC ,0xDE ,0x00 ,0x00 ,0x00 ,0x00 ,0x00 ,0x00 ,0x00};
++          ret = 36;
+ 
+-      ret = sizeof(inquiry_rsp);
+-      memcpy(buffer, &inquiry_rsp, ret);
++          memcpy(buffer, &version, ret);
++      } else {
++        scsi_inquiry_resp_t inquiry_rsp =
++        {
++            .is_removable         = 1,
++            .version              = 2,
++            .response_data_format = 2,
++            // vendor_id, product_id, product_rev is space padded string
++            .vendor_id            = "",
++            .product_id           = "",
++            .product_rev          = "",
++        };
++
++        memset(inquiry_rsp.vendor_id, ' ', sizeof(inquiry_rsp.vendor_id));
++        memcpy(inquiry_rsp.vendor_id, CFG_TUD_MSC_VENDOR, tu_min32(strlen(CFG_TUD_MSC_VENDOR), sizeof(inquiry_rsp.vendor_id)));
++
++        memset(inquiry_rsp.product_id, ' ', sizeof(inquiry_rsp.product_id));
++        memcpy(inquiry_rsp.product_id, CFG_TUD_MSC_PRODUCT, tu_min32(strlen(CFG_TUD_MSC_PRODUCT), sizeof(inquiry_rsp.product_id)));
++
++        memset(inquiry_rsp.product_rev, ' ', sizeof(inquiry_rsp.product_rev));
++        memcpy(inquiry_rsp.product_rev, CFG_TUD_MSC_PRODUCT_REV, tu_min32(strlen(CFG_TUD_MSC_PRODUCT_REV), sizeof(inquiry_rsp.product_rev)));
++
++        ret = sizeof(inquiry_rsp);
++        memcpy(buffer, &inquiry_rsp, ret);
++      }
+     }
+     break;
+ 
+diff --git a/src/device/usbd.h b/src/device/usbd.h
+index 8debbf53..5098e8fd 100644
+--- a/src/device/usbd.h
++++ b/src/device/usbd.h
+@@ -1,4 +1,4 @@
+-/* 
++/*
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2018, hathach (tinyusb.org)
+@@ -114,9 +114,9 @@ ATTR_WEAK void tud_resume_cb(void);
+   /* CDC Control Interface */\
+   9, TUSB_DESC_INTERFACE, _itfnum, 0, 1, TUSB_CLASS_CDC, CDC_COMM_SUBCLASS_ABSTRACT_CONTROL_MODEL, CDC_COMM_PROTOCOL_ATCOMMAND, _stridx,\
+   /* CDC Header */\
+-  5, TUSB_DESC_CLASS_SPECIFIC, CDC_FUNC_DESC_HEADER, U16_TO_U8S_LE(0x0120),\
++  5, TUSB_DESC_CLASS_SPECIFIC, CDC_FUNC_DESC_HEADER, U16_TO_U8S_LE(0x0110),\
+   /* CDC Call */\
+-  5, TUSB_DESC_CLASS_SPECIFIC, CDC_FUNC_DESC_CALL_MANAGEMENT, 0, (_itfnum) + 1,\
++  5, TUSB_DESC_CLASS_SPECIFIC, CDC_FUNC_DESC_CALL_MANAGEMENT, 1, (_itfnum) + 1,\
+   /* CDC ACM: support line request */\
+   4, TUSB_DESC_CLASS_SPECIFIC, CDC_FUNC_DESC_ABSTRACT_CONTROL_MANAGEMENT, 2,\
+   /* CDC Union */\
+@@ -126,9 +126,9 @@ ATTR_WEAK void tud_resume_cb(void);
+   /* CDC Data Interface */\
+   9, TUSB_DESC_INTERFACE, (_itfnum)+1, 0, 2, TUSB_CLASS_CDC_DATA, 0, 0, 0,\
+   /* Endpoint Out */\
+-  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0,\
++  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 16,\
+   /* Endpoint In */\
+-  7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0
++  7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 16
+ 
+ //------------- MSC -------------//
+ 
+@@ -139,10 +139,10 @@ ATTR_WEAK void tud_resume_cb(void);
+ #define TUD_MSC_DESCRIPTOR(_itfnum, _stridx, _epout, _epin, _epsize) \
+   /* Interface */\
+   9, TUSB_DESC_INTERFACE, _itfnum, 0, 2, TUSB_CLASS_MSC, MSC_SUBCLASS_SCSI, MSC_PROTOCOL_BOT, _stridx,\
+-  /* Endpoint Out */\
+-  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0,\
+   /* Endpoint In */\
+-  7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0
++  7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0,\
++  /* Endpoint Out */\
++  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0
+ 
+ //------------- HID -------------//
+ 

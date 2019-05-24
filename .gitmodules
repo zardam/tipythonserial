@@ -1,0 +1,6 @@
+[submodule "tinyusb"]
+	path = tinyusb
+	url = https://github.com/hathach/tinyusb.git
+[submodule "uf2-samdx1"]
+	path = uf2-samdx1
+	url = https://github.com/microsoft/uf2-samdx1.git
